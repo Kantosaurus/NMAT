@@ -18,16 +18,6 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('security-alert', (event, alert) => callback(alert));
   },
 
-  // Window controls
-  windowMinimize: () => ipcRenderer.invoke('window-minimize'),
-  windowMaximize: () => ipcRenderer.invoke('window-maximize'),
-  windowClose: () => ipcRenderer.invoke('window-close'),
-  windowIsMaximized: () => ipcRenderer.invoke('window-is-maximized'),
-
-  onWindowMaximized: (callback) => {
-    ipcRenderer.on('window-maximized', (event, isMaximized) => callback(isMaximized));
-  },
-
   // HTTP Proxy controls
   startProxy: (port) => ipcRenderer.invoke('start-proxy', port),
   stopProxy: () => ipcRenderer.invoke('stop-proxy'),
@@ -65,5 +55,11 @@ contextBridge.exposeInMainWorld('api', {
 
   onIntruderProgress: (callback) => {
     ipcRenderer.on('intruder-progress', (event, progress) => callback(progress));
-  }
+  },
+
+  // Window controls
+  windowMinimize: () => ipcRenderer.invoke('window-minimize'),
+  windowMaximize: () => ipcRenderer.invoke('window-maximize'),
+  windowClose: () => ipcRenderer.invoke('window-close'),
+  windowIsMaximized: () => ipcRenderer.invoke('window-is-maximized')
 });

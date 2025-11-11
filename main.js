@@ -9,6 +9,9 @@ let packetCapture;
 let securityDetector;
 let httpProxy;
 
+// Development mode check
+const isDev = !app.isPackaged;
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1400,
@@ -16,8 +19,7 @@ function createWindow() {
     minWidth: 1000,
     minHeight: 700,
     frame: false,
-    transparent: true,
-    backgroundColor: '#00000000',
+    titleBarStyle: 'hidden',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
@@ -27,20 +29,12 @@ function createWindow() {
     icon: path.join(__dirname, 'assets', 'icon.png')
   });
 
-  mainWindow.loadFile('index.html');
-
-  // Handle maximize/unmaximize events
-  mainWindow.on('maximize', () => {
-    mainWindow.webContents.send('window-maximized', true);
-  });
-
-  mainWindow.on('unmaximize', () => {
-    mainWindow.webContents.send('window-maximized', false);
-  });
-
-  // Open DevTools in development
-  if (process.argv.includes('--dev')) {
+  // Load from Vite dev server in development, or from built files in production
+  if (isDev) {
+    mainWindow.loadURL('http://localhost:3000');
     mainWindow.webContents.openDevTools();
+  } else {
+    mainWindow.loadFile(path.join(__dirname, 'dist', 'index.html'));
   }
 
   mainWindow.on('closed', () => {
@@ -149,10 +143,10 @@ ipcMain.handle('export-packets', async (event, packets, format) => {
       if (format === 'json') {
         content = JSON.stringify(packets, null, 2);
       } else if (format === 'csv') {
-        const headers = 'No,Time,Source,Destination,Protocol,Length,Info\n';
+        const headers = 'No,Time,Source,Destination,Protocol,Length,Info\\n';
         const rows = packets.map(p =>
           `${p.no},${p.timestamp},${p.source},${p.destination},${p.protocol},${p.length},"${p.info}"`
-        ).join('\n');
+        ).join('\\n');
         content = headers + rows;
       }
 
@@ -232,8 +226,13 @@ ipcMain.handle('start-proxy', async (event, port = 8080) => {
     const { session } = require('electron');
     const proxySession = session.fromPartition('proxy-session');
     await proxySession.setProxy({
-      proxyRules: `http://127.0.0.1:${port}`,
-      proxyBypassRules: '<local>'
+      proxyRules: `http=127.0.0.1:${port};https=127.0.0.1:${port}`,
+      proxyBypassRules: '<-loopback>'
+    });
+
+    // Disable certificate verification for the proxy session
+    proxySession.setCertificateVerifyProc((request, callback) => {
+      callback(0); // Accept all certificates
     });
 
     return { success: true, port };
