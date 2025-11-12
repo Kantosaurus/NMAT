@@ -1,7 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { IconPlayerPlay, IconPlayerStop, IconGlobe, IconArrowLeft, IconArrowRight, IconRefresh, IconHome } from '@tabler/icons-react';
+import { IconPlayerPlay, IconPlayerStop, IconGlobe, IconArrowLeft, IconArrowRight, IconRefresh, IconHome, IconPlus, IconX, IconAlertCircle, IconFolderOpen } from '@tabler/icons-react';
 import { ProxyHistoryItem, InterceptItem } from '@/types';
 import { cn } from '@/lib/utils';
+
+interface BrowserTab {
+  id: number;
+  title: string;
+  url: string;
+  currentUrl: string;
+}
 
 type ProxyTab = 'browser' | 'intercept' | 'history' | 'repeater' | 'intruder';
 
@@ -13,6 +20,7 @@ export const HTTPProxy: React.FC = () => {
   const [history, setHistory] = useState<ProxyHistoryItem[]>([]);
   const [currentIntercept, setCurrentIntercept] = useState<InterceptItem | null>(null);
   const [selectedHistoryItem, setSelectedHistoryItem] = useState<ProxyHistoryItem | null>(null);
+  const [showCertWarning, setShowCertWarning] = useState(true);
 
   // Set up proxy listeners
   useEffect(() => {
@@ -109,6 +117,28 @@ export const HTTPProxy: React.FC = () => {
 
   return (
     <div className="flex h-full flex-col gap-4">
+      {/* Certificate Warning Banner */}
+      {showCertWarning && isRunning && (
+        <div className="flex items-start gap-3 rounded-lg border border-green-300 bg-green-50 p-4 dark:border-green-700 dark:bg-green-900/20">
+          <IconAlertCircle className="flex-shrink-0 text-green-600 dark:text-green-400" size={24} />
+          <div className="flex-1">
+            <h3 className="font-semibold text-green-900 dark:text-green-200">HTTPS Interception Active</h3>
+            <p className="mt-1 text-sm text-green-800 dark:text-green-300">
+              A unique CA certificate has been automatically installed for this session. It will be removed when you stop the proxy.
+              Check the console for installation status.
+            </p>
+            <div className="mt-3 flex gap-2">
+              <button
+                onClick={() => setShowCertWarning(false)}
+                className="rounded-lg border border-green-300 px-3 py-1.5 text-sm font-medium text-green-900 hover:bg-green-100 dark:border-green-700 dark:text-green-200 dark:hover:bg-green-900/40"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Controls */}
       <div className="flex items-center gap-4">
         <input
@@ -418,65 +448,159 @@ const IntruderTab: React.FC = () => {
 
 // Browser Tab Component
 const BrowserTab: React.FC<{ isRunning: boolean; proxyPort: number }> = ({ isRunning, proxyPort }) => {
+  const [tabs, setTabs] = useState<BrowserTab[]>([
+    { id: 1, title: 'New Tab', url: 'https://www.google.com', currentUrl: 'https://www.google.com' }
+  ]);
+  const [activeTabIndex, setActiveTabIndex] = useState(0);
+  const [nextTabId, setNextTabId] = useState(2);
   const [url, setUrl] = useState('https://www.google.com');
-  const [currentUrl, setCurrentUrl] = useState('https://www.google.com');
-  const webviewRef = useRef<any>(null);
+  const webviewRefs = useRef<Map<number, any>>(new Map());
 
+  // Sync URL bar with active tab
   useEffect(() => {
-    const webview = webviewRef.current;
-    if (!webview) return;
+    if (tabs[activeTabIndex]) {
+      setUrl(tabs[activeTabIndex].currentUrl);
+    }
+  }, [activeTabIndex, tabs]);
 
+  const setupWebviewListeners = (webview: any, tabId: number) => {
     const handleDidNavigate = (e: any) => {
-      setCurrentUrl(e.url);
-      setUrl(e.url);
+      updateTabUrl(tabId, e.url);
+      updateTabTitle(tabId, webview.getTitle() || 'New Tab');
     };
 
     const handleDidNavigateInPage = (e: any) => {
       if (e.isMainFrame) {
-        setCurrentUrl(e.url);
-        setUrl(e.url);
+        updateTabUrl(tabId, e.url);
       }
+    };
+
+    const handlePageTitleUpdated = (e: any) => {
+      updateTabTitle(tabId, e.title || 'New Tab');
+    };
+
+    const handleDidFailLoad = (e: any) => {
+      console.error('Webview load failed:', e.errorDescription, 'for', e.validatedURL);
     };
 
     webview.addEventListener('did-navigate', handleDidNavigate);
     webview.addEventListener('did-navigate-in-page', handleDidNavigateInPage);
+    webview.addEventListener('page-title-updated', handlePageTitleUpdated);
+    webview.addEventListener('did-fail-load', handleDidFailLoad);
+  };
 
-    return () => {
-      webview.removeEventListener('did-navigate', handleDidNavigate);
-      webview.removeEventListener('did-navigate-in-page', handleDidNavigateInPage);
+  const updateTabUrl = (tabId: number, newUrl: string) => {
+    setTabs(prev => prev.map(tab =>
+      tab.id === tabId ? { ...tab, currentUrl: newUrl } : tab
+    ));
+  };
+
+  const updateTabTitle = (tabId: number, title: string) => {
+    setTabs(prev => prev.map(tab =>
+      tab.id === tabId ? { ...tab, title: title.substring(0, 30) } : tab
+    ));
+  };
+
+  const handleNewTab = () => {
+    const newTab: BrowserTab = {
+      id: nextTabId,
+      title: 'New Tab',
+      url: 'https://www.google.com',
+      currentUrl: 'https://www.google.com'
     };
-  }, []);
+    setTabs(prev => [...prev, newTab]);
+    setActiveTabIndex(tabs.length);
+    setNextTabId(prev => prev + 1);
+  };
+
+  const handleCloseTab = (index: number, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (tabs.length === 1) return; // Don't close last tab
+
+    const tabId = tabs[index].id;
+    webviewRefs.current.delete(tabId);
+
+    setTabs(prev => prev.filter((_, i) => i !== index));
+
+    if (activeTabIndex >= index && activeTabIndex > 0) {
+      setActiveTabIndex(prev => prev - 1);
+    }
+  };
+
+  const handleSwitchTab = (index: number) => {
+    setActiveTabIndex(index);
+  };
+
+  const getActiveWebview = () => {
+    const activeTab = tabs[activeTabIndex];
+    return activeTab ? webviewRefs.current.get(activeTab.id) : null;
+  };
 
   const handleNavigate = (e: React.FormEvent) => {
     e.preventDefault();
-    if (webviewRef.current) {
-      let navigationUrl = url;
-      if (!url.startsWith('http://') && !url.startsWith('https://')) {
-        navigationUrl = 'https://' + url;
+    const webview = getActiveWebview();
+    if (!webview) return;
+
+    let navigationUrl = url.trim();
+
+    // If it already has a protocol, use it as-is
+    if (navigationUrl.startsWith('http://') || navigationUrl.startsWith('https://')) {
+      webview.loadURL(navigationUrl);
+      return;
+    }
+
+    // Check if it looks like a domain/URL
+    const isDomain = /^[a-zA-Z0-9][a-zA-Z0-9-]*(\.[a-zA-Z0-9][a-zA-Z0-9-]*)*(\.[a-zA-Z]{2,})?$/.test(navigationUrl);
+
+    if (isDomain) {
+      // If it doesn't end with a TLD, append .com
+      if (!navigationUrl.includes('.')) {
+        navigationUrl = navigationUrl + '.com';
       }
-      webviewRef.current.loadURL(navigationUrl);
+      // Add https:// protocol
+      navigationUrl = 'https://' + navigationUrl;
+
+      // Try to load the URL, but set up error handling
+      const handleLoadError = () => {
+        // If the URL fails to load, fall back to Google search
+        const searchUrl = 'https://www.google.com/search?q=' + encodeURIComponent(url);
+        webview?.loadURL(searchUrl);
+        webview?.removeEventListener('did-fail-load', handleLoadError);
+      };
+
+      webview.addEventListener('did-fail-load', handleLoadError, { once: true });
+      webview.loadURL(navigationUrl);
+    } else {
+      // Doesn't look like a domain, perform Google search
+      const searchUrl = 'https://www.google.com/search?q=' + encodeURIComponent(navigationUrl);
+      webview.loadURL(searchUrl);
     }
   };
 
   const handleBack = () => {
-    if (webviewRef.current?.canGoBack()) {
-      webviewRef.current.goBack();
+    const webview = getActiveWebview();
+    if (webview?.canGoBack()) {
+      webview.goBack();
     }
   };
 
   const handleForward = () => {
-    if (webviewRef.current?.canGoForward()) {
-      webviewRef.current.goForward();
+    const webview = getActiveWebview();
+    if (webview?.canGoForward()) {
+      webview.goForward();
     }
   };
 
   const handleRefresh = () => {
-    webviewRef.current?.reload();
+    const webview = getActiveWebview();
+    webview?.reload();
   };
 
   const handleHome = () => {
-    setUrl('https://www.google.com');
-    webviewRef.current?.loadURL('https://www.google.com');
+    const webview = getActiveWebview();
+    const homeUrl = 'https://www.google.com';
+    setUrl(homeUrl);
+    webview?.loadURL(homeUrl);
   };
 
   if (!isRunning) {
@@ -492,6 +616,40 @@ const BrowserTab: React.FC<{ isRunning: boolean; proxyPort: number }> = ({ isRun
 
   return (
     <div className="h-full flex flex-col rounded-lg border border-neutral-200 bg-white dark:border-neutral-700 dark:bg-neutral-900 overflow-hidden">
+      {/* Tab Bar */}
+      <div className="flex items-center gap-1 px-2 pt-2 bg-neutral-100 dark:bg-neutral-800 overflow-x-auto">
+        {tabs.map((tab, index) => (
+          <div
+            key={tab.id}
+            onClick={() => handleSwitchTab(index)}
+            className={cn(
+              "flex items-center gap-2 px-3 py-1.5 rounded-t-lg cursor-pointer min-w-[120px] max-w-[200px] group",
+              index === activeTabIndex
+                ? "bg-white dark:bg-neutral-900 border-t border-l border-r border-neutral-200 dark:border-neutral-700"
+                : "bg-neutral-50 dark:bg-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-600"
+            )}
+          >
+            <span className="text-xs truncate flex-1">{tab.title}</span>
+            {tabs.length > 1 && (
+              <button
+                onClick={(e) => handleCloseTab(index, e)}
+                className="p-0.5 hover:bg-neutral-200 dark:hover:bg-neutral-600 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+                title="Close tab"
+              >
+                <IconX size={12} />
+              </button>
+            )}
+          </div>
+        ))}
+        <button
+          onClick={handleNewTab}
+          className="p-1.5 hover:bg-neutral-200 dark:hover:bg-neutral-700 rounded"
+          title="New tab"
+        >
+          <IconPlus size={16} />
+        </button>
+      </div>
+
       {/* Browser Controls */}
       <div className="flex items-center gap-2 p-2 border-b border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-800">
         <button
@@ -546,14 +704,26 @@ const BrowserTab: React.FC<{ isRunning: boolean; proxyPort: number }> = ({ isRun
         </div>
       </div>
 
-      {/* Webview Browser */}
-      <webview
-        ref={webviewRef}
-        src={currentUrl}
-        partition="proxy-session"
-        className="flex-1 w-full h-full"
-        allowpopups="true"
-      />
+      {/* Webview Container */}
+      <div className="flex-1 relative">
+        {tabs.map((tab, index) => (
+          <webview
+            key={tab.id}
+            ref={(el: any) => {
+              if (el && !webviewRefs.current.has(tab.id)) {
+                webviewRefs.current.set(tab.id, el);
+                setupWebviewListeners(el, tab.id);
+              }
+            }}
+            src={tab.currentUrl}
+            disablewebsecurity="true"
+            className={cn(
+              "absolute inset-0 w-full h-full",
+              index === activeTabIndex ? "block" : "hidden"
+            )}
+          />
+        ))}
+      </div>
     </div>
   );
 };

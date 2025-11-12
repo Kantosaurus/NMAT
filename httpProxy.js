@@ -1,8 +1,10 @@
 const http = require('http');
 const https = require('https');
 const net = require('net');
+const tls = require('tls');
 const { URL } = require('url');
 const EventEmitter = require('events');
+const forge = require('node-forge');
 
 class HTTPProxy extends EventEmitter {
   constructor(port = 8080) {
@@ -13,9 +15,270 @@ class HTTPProxy extends EventEmitter {
     this.interceptQueue = [];
     this.history = [];
     this.requestId = 0;
+    this.caCert = null;
+    this.caKey = null;
+    this.certCache = new Map();
+    this.certInstalled = false;
+    this.certPath = null;
   }
 
-  start() {
+  generateCACertificate() {
+    console.log('Generating new CA certificate for this session...');
+
+    // Generate a keypair for the CA
+    const keys = forge.pki.rsa.generateKeyPair(2048);
+
+    // Create a certificate with random serial for anonymity
+    const cert = forge.pki.createCertificate();
+    cert.publicKey = keys.publicKey;
+    cert.serialNumber = Math.floor(Math.random() * 1000000000).toString();
+    cert.validity.notBefore = new Date();
+    cert.validity.notAfter = new Date();
+    cert.validity.notAfter.setFullYear(cert.validity.notBefore.getFullYear() + 1); // 1 year validity
+
+    // Use randomized organization name for anonymity
+    const randomId = Math.random().toString(36).substring(2, 8).toUpperCase();
+    const attrs = [{
+      name: 'commonName',
+      value: `Local Proxy CA ${randomId}`
+    }, {
+      name: 'countryName',
+      value: 'US'
+    }, {
+      shortName: 'ST',
+      value: 'State'
+    }, {
+      name: 'localityName',
+      value: 'City'
+    }, {
+      name: 'organizationName',
+      value: `LocalDev ${randomId}`
+    }, {
+      shortName: 'OU',
+      value: 'Development'
+    }];
+
+    cert.setSubject(attrs);
+    cert.setIssuer(attrs);
+    cert.setExtensions([{
+      name: 'basicConstraints',
+      cA: true
+    }, {
+      name: 'keyUsage',
+      keyCertSign: true,
+      digitalSignature: true,
+      nonRepudiation: true,
+      keyEncipherment: true,
+      dataEncipherment: true
+    }]);
+
+    // Self-sign certificate
+    cert.sign(keys.privateKey, forge.md.sha256.create());
+
+    this.caCert = cert;
+    this.caKey = keys.privateKey;
+    this.certCache.clear(); // Clear cached certificates
+
+    console.log('CA Certificate generated with serial:', cert.serialNumber);
+  }
+
+  async installCACertificate() {
+    const fs = require('fs');
+    const path = require('path');
+    const { execFile } = require('child_process');
+    const { promisify } = require('util');
+    const execFileAsync = promisify(execFile);
+
+    try {
+      const caCertPem = forge.pki.certificateToPem(this.caCert);
+
+      // Use temp directory with random name for anonymity
+      const os = require('os');
+      const tempDir = os.tmpdir();
+      const randomName = `cert_${Math.random().toString(36).substring(2, 10)}.pem`;
+      this.certPath = path.join(tempDir, randomName);
+
+      fs.writeFileSync(this.certPath, caCertPem);
+      console.log('Certificate written to:', this.certPath);
+
+      const platform = process.platform;
+
+      if (platform === 'win32') {
+        // Windows: Use certutil to install certificate
+        console.log('Installing certificate to Windows trust store...');
+        try {
+          await execFileAsync('certutil', ['-addstore', '-user', 'Root', this.certPath]);
+          console.log('✓ Certificate installed successfully to Windows trust store');
+          this.certInstalled = true;
+        } catch (error) {
+          console.error('Failed to auto-install certificate. Error:', error.message);
+          console.log('You may need to run as Administrator or install manually.');
+          console.log('Run this command manually: certutil -addstore -user Root "' + this.certPath + '"');
+        }
+      } else if (platform === 'darwin') {
+        // macOS: Use security command to install certificate
+        console.log('Installing certificate to macOS Keychain...');
+        try {
+          await execFileAsync('sudo', ['security', 'add-trusted-cert', '-d', '-r', 'trustRoot', '-k', '/Library/Keychains/System.keychain', this.certPath]);
+          console.log('✓ Certificate installed successfully to macOS Keychain');
+          this.certInstalled = true;
+        } catch (error) {
+          console.error('Failed to auto-install certificate. Error:', error.message);
+          console.log('Run this command manually:');
+          console.log('sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "' + this.certPath + '"');
+        }
+      } else if (platform === 'linux') {
+        // Linux: Copy to ca-certificates and update
+        console.log('Installing certificate to Linux trust store...');
+        try {
+          const destPath = `/usr/local/share/ca-certificates/${randomName.replace('.pem', '.crt')}`;
+          await execFileAsync('sudo', ['cp', this.certPath, destPath]);
+          await execFileAsync('sudo', ['update-ca-certificates']);
+          console.log('✓ Certificate installed successfully to Linux trust store');
+          this.certInstalled = true;
+        } catch (error) {
+          console.error('Failed to auto-install certificate. Error:', error.message);
+          console.log('Run these commands manually:');
+          console.log('sudo cp "' + this.certPath + '" /usr/local/share/ca-certificates/');
+          console.log('sudo update-ca-certificates');
+        }
+      }
+
+      if (this.certInstalled) {
+        console.log('');
+        console.log('='.repeat(70));
+        console.log('HTTPS interception is now enabled!');
+        console.log('Certificate will be automatically removed when proxy stops.');
+        console.log('='.repeat(70));
+        console.log('');
+      }
+
+    } catch (error) {
+      console.error('Failed to install CA certificate:', error.message);
+    }
+  }
+
+  async uninstallCACertificate() {
+    if (!this.certInstalled || !this.certPath) {
+      return;
+    }
+
+    const fs = require('fs');
+    const { execFile } = require('child_process');
+    const { promisify } = require('util');
+    const execFileAsync = promisify(execFile);
+
+    try {
+      const platform = process.platform;
+      console.log('Removing installed certificate...');
+
+      if (platform === 'win32') {
+        // Windows: Remove from certificate store
+        const certName = `Local Proxy CA`;
+        try {
+          await execFileAsync('certutil', ['-delstore', '-user', 'Root', certName]);
+          console.log('✓ Certificate removed from Windows trust store');
+        } catch (error) {
+          console.log('Note: Certificate may need manual removal from Windows Certificate Manager');
+        }
+      } else if (platform === 'darwin') {
+        // macOS: Remove from keychain
+        try {
+          await execFileAsync('sudo', ['security', 'delete-certificate', '-c', 'Local Proxy CA', '/Library/Keychains/System.keychain']);
+          console.log('✓ Certificate removed from macOS Keychain');
+        } catch (error) {
+          console.log('Note: Certificate may need manual removal from Keychain Access');
+        }
+      } else if (platform === 'linux') {
+        // Linux: Remove from ca-certificates
+        const path = require('path');
+        const certFileName = path.basename(this.certPath).replace('.pem', '.crt');
+        try {
+          await execFileAsync('sudo', ['rm', `/usr/local/share/ca-certificates/${certFileName}`]);
+          await execFileAsync('sudo', ['update-ca-certificates', '--fresh']);
+          console.log('✓ Certificate removed from Linux trust store');
+        } catch (error) {
+          console.log('Note: Certificate may need manual removal');
+        }
+      }
+
+      // Delete temp file
+      if (fs.existsSync(this.certPath)) {
+        fs.unlinkSync(this.certPath);
+      }
+
+      this.certInstalled = false;
+      this.certPath = null;
+
+    } catch (error) {
+      console.error('Error during certificate cleanup:', error.message);
+    }
+  }
+
+  generateCertificateForHostname(hostname) {
+    // Check cache first
+    if (this.certCache.has(hostname)) {
+      return this.certCache.get(hostname);
+    }
+
+    // Generate a keypair for this domain
+    const keys = forge.pki.rsa.generateKeyPair(2048);
+
+    // Create a certificate
+    const cert = forge.pki.createCertificate();
+    cert.publicKey = keys.publicKey;
+    cert.serialNumber = Math.floor(Math.random() * 100000).toString();
+    cert.validity.notBefore = new Date();
+    cert.validity.notAfter = new Date();
+    cert.validity.notAfter.setFullYear(cert.validity.notBefore.getFullYear() + 1);
+
+    const attrs = [{
+      name: 'commonName',
+      value: hostname
+    }];
+
+    cert.setSubject(attrs);
+    cert.setIssuer(this.caCert.subject.attributes);
+
+    cert.setExtensions([{
+      name: 'subjectAltName',
+      altNames: [{
+        type: 2, // DNS
+        value: hostname
+      }]
+    }, {
+      name: 'keyUsage',
+      digitalSignature: true,
+      keyEncipherment: true
+    }, {
+      name: 'extKeyUsage',
+      serverAuth: true
+    }]);
+
+    // Sign with CA
+    cert.sign(this.caKey, forge.md.sha256.create());
+
+    const certPem = forge.pki.certificateToPem(cert);
+    const keyPem = forge.pki.privateKeyToPem(keys.privateKey);
+
+    const result = { cert: certPem, key: keyPem };
+    this.certCache.set(hostname, result);
+
+    return result;
+  }
+
+  async start() {
+    // Generate a new CA certificate for this session (anonymity)
+    this.generateCACertificate();
+
+    // Automatically install the certificate BEFORE starting server
+    await this.installCACertificate();
+
+    // Signal that certificate is ready (so Electron can reinit session)
+    if (this.certInstalled) {
+      this.emit('cert-ready');
+    }
+
     this.server = http.createServer((req, res) => {
       this.handleHTTPRequest(req, res);
     });
@@ -35,10 +298,14 @@ class HTTPProxy extends EventEmitter {
     });
   }
 
-  stop() {
+  async stop() {
     if (this.server) {
-      this.server.close(() => {
+      this.server.close(async () => {
         console.log('HTTP Proxy stopped');
+
+        // Remove the certificate from system trust store
+        await this.uninstallCACertificate();
+
         this.emit('stopped');
       });
     }
@@ -152,43 +419,215 @@ class HTTPProxy extends EventEmitter {
   }
 
   handleHTTPSConnect(req, clientSocket, head) {
-    const requestId = ++this.requestId;
     const { port, hostname } = new URL(`https://${req.url}`);
 
-    const requestData = {
-      id: requestId,
-      method: 'CONNECT',
-      url: req.url,
-      hostname,
-      port: port || 443,
-      protocol: 'HTTPS',
-      timestamp: new Date().toISOString()
-    };
+    // Generate a fake certificate for this hostname
+    const fakeCert = this.generateCertificateForHostname(hostname);
 
-    // For HTTPS, we tunnel (can't intercept without SSL cert)
-    const serverSocket = net.connect(port || 443, hostname, () => {
-      clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-      serverSocket.write(head);
-      serverSocket.pipe(clientSocket);
-      clientSocket.pipe(serverSocket);
+    // Tell the client the connection is established
+    clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n', () => {
+      // After the response is fully sent, start TLS
+      try {
+        const tlsOptions = {
+          key: fakeCert.key,
+          cert: fakeCert.cert,
+          rejectUnauthorized: false,
+          requestCert: false,
+          honorCipherOrder: true,
+          secureOptions: require('constants').SSL_OP_NO_TLSv1 | require('constants').SSL_OP_NO_TLSv1_1
+        };
 
-      // Log HTTPS connection
-      this.addToHistory({
-        ...requestData,
-        response: {
-          statusCode: 200,
-          statusMessage: 'Connection Established'
+        // Create a secure socket wrapper
+        const tlsSocket = new tls.TLSSocket(clientSocket, {
+          isServer: true,
+          ...tlsOptions
+        });
+
+        // Handle any TLS handshake errors
+        tlsSocket.on('error', (error) => {
+          console.error(`TLS handshake error for ${hostname}:`, error.message);
+          try {
+            tlsSocket.destroy();
+          } catch (e) {
+            // Already destroyed
+          }
+        });
+
+        // Once TLS handshake is complete, handle the connection
+        tlsSocket.on('secure', () => {
+          this.handleTLSConnection(tlsSocket, hostname, port || 443);
+        });
+
+      } catch (error) {
+        console.error('Failed to create TLS socket:', error);
+        clientSocket.destroy();
+      }
+    });
+  }
+
+  handleTLSConnection(tlsSocket, hostname, port) {
+
+    // Buffer to collect the decrypted HTTPS request
+    let buffer = Buffer.alloc(0);
+
+    tlsSocket.on('data', async (chunk) => {
+      buffer = Buffer.concat([buffer, chunk]);
+
+      // Try to parse the HTTP request from the buffer
+      const bufferStr = buffer.toString('utf-8');
+      const headerEndIndex = bufferStr.indexOf('\r\n\r\n');
+
+      if (headerEndIndex === -1) {
+        // Headers not complete yet, wait for more data
+        return;
+      }
+
+      // Parse the request
+      const headerStr = bufferStr.substring(0, headerEndIndex);
+      const lines = headerStr.split('\r\n');
+      const [method, path, httpVersion] = lines[0].split(' ');
+
+      const headers = {};
+      for (let i = 1; i < lines.length; i++) {
+        const colonIndex = lines[i].indexOf(':');
+        if (colonIndex !== -1) {
+          const headerName = lines[i].substring(0, colonIndex).trim();
+          const headerValue = lines[i].substring(colonIndex + 1).trim();
+          headers[headerName.toLowerCase()] = headerValue;
         }
-      });
+      }
+
+      // Get body if present
+      const bodyStartIndex = headerEndIndex + 4;
+      const bodyBuffer = buffer.slice(bodyStartIndex);
+
+      // Check if we have the complete body based on Content-Length
+      const contentLength = parseInt(headers['content-length'] || '0', 10);
+      if (bodyBuffer.length < contentLength) {
+        // Body not complete yet, wait for more data
+        return;
+      }
+
+      const requestId = ++this.requestId;
+      const fullUrl = `https://${hostname}${path}`;
+
+      // Only use the exact amount of body bytes specified by Content-Length
+      const requestBody = bodyBuffer.slice(0, contentLength);
+
+      const requestData = {
+        id: requestId,
+        method: method,
+        url: fullUrl,
+        path: path,
+        httpVersion: httpVersion,
+        headers: headers,
+        body: requestBody,
+        bodyString: requestBody.toString('utf-8'),
+        timestamp: new Date().toISOString(),
+        protocol: 'HTTPS',
+        hostname: hostname
+      };
+
+      // Reset buffer, keeping any data after this request for the next request
+      buffer = bodyBuffer.slice(contentLength);
+
+      // Check if intercept is enabled
+      if (this.interceptEnabled) {
+        const result = await this.interceptRequest(requestData);
+        if (result.action === 'drop') {
+          tlsSocket.write('HTTP/1.1 200 OK\r\nContent-Length: 26\r\n\r\nRequest dropped by proxy');
+          tlsSocket.end();
+          return;
+        }
+        if (result.action === 'forward') {
+          requestData.method = result.request.method;
+          requestData.url = result.request.url;
+          requestData.path = result.request.path || path;
+          requestData.headers = result.request.headers;
+          requestData.body = Buffer.from(result.request.bodyString || '');
+        }
+      }
+
+      // Forward the request to the real server
+      const startTime = Date.now();
+
+      try {
+        const targetUrl = new URL(requestData.url);
+
+        const options = {
+          hostname: targetUrl.hostname,
+          port: targetUrl.port || 443,
+          path: targetUrl.pathname + targetUrl.search,
+          method: requestData.method,
+          headers: requestData.headers,
+          rejectUnauthorized: false
+        };
+
+        const proxyReq = https.request(options, (proxyRes) => {
+          const responseChunks = [];
+          proxyRes.on('data', chunk => responseChunks.push(chunk));
+          proxyRes.on('end', () => {
+            const responseBody = Buffer.concat(responseChunks);
+
+            const responseData = {
+              id: requestId,
+              statusCode: proxyRes.statusCode,
+              statusMessage: proxyRes.statusMessage,
+              headers: { ...proxyRes.headers },
+              body: responseBody,
+              bodyString: responseBody.toString('utf-8'),
+              length: responseBody.length,
+              time: Date.now() - startTime
+            };
+
+            // Add to history
+            this.addToHistory({
+              ...requestData,
+              response: responseData
+            });
+
+            // Forward response to client
+            let responseStr = `HTTP/1.1 ${proxyRes.statusCode} ${proxyRes.statusMessage}\r\n`;
+            for (const [key, value] of Object.entries(proxyRes.headers)) {
+              responseStr += `${key}: ${value}\r\n`;
+            }
+            responseStr += '\r\n';
+
+            tlsSocket.write(responseStr);
+            tlsSocket.write(responseBody);
+            tlsSocket.end();
+          });
+        });
+
+        proxyReq.on('error', (error) => {
+          console.error('HTTPS proxy request error:', error);
+          tlsSocket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n');
+          tlsSocket.end();
+        });
+
+        if (requestData.body.length > 0) {
+          proxyReq.write(requestData.body);
+        }
+        proxyReq.end();
+
+      } catch (error) {
+        console.error('HTTPS request handling error:', error);
+        tlsSocket.write('HTTP/1.1 500 Internal Server Error\r\n\r\n');
+        tlsSocket.end();
+      }
     });
 
-    serverSocket.on('error', (error) => {
-      console.error('HTTPS tunnel error:', error);
-      clientSocket.end();
+    tlsSocket.on('error', (error) => {
+      console.error(`TLS socket error for ${hostname}:`, error.message);
+      try {
+        tlsSocket.destroy();
+      } catch (e) {
+        // Socket already destroyed
+      }
     });
 
-    clientSocket.on('error', () => {
-      serverSocket.end();
+    tlsSocket.on('end', () => {
+      tlsSocket.end();
     });
   }
 

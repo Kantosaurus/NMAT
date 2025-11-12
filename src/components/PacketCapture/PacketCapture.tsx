@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { IconNetwork, IconPlayerPlay, IconPlayerStop, IconTrash, IconFileExport, IconChartBar, IconAlertTriangle } from '@tabler/icons-react';
-import { Packet, NetworkInterface, SecurityAlert } from '@/types';
+import { Packet, NetworkInterface, SecurityAlert, ExpertAlert } from '@/types';
 import { cn } from '@/lib/utils';
+import StatisticsPanel from './StatisticsPanel';
 
 export const PacketCapture: React.FC = () => {
   const [interfaces, setInterfaces] = useState<NetworkInterface[]>([]);
@@ -11,6 +12,19 @@ export const PacketCapture: React.FC = () => {
   const [selectedPacket, setSelectedPacket] = useState<Packet | null>(null);
   const [filter, setFilter] = useState('');
   const [securityAlerts, setSecurityAlerts] = useState<SecurityAlert[]>([]);
+  const [expertAlerts, setExpertAlerts] = useState<ExpertAlert[]>([]);
+  const [showStatistics, setShowStatistics] = useState(false);
+
+  // Advanced capture options
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [bpfFilter, setBpfFilter] = useState('');
+  const [promiscuous, setPromiscuous] = useState(true);
+  const [monitorMode, setMonitorMode] = useState(false);
+  const [maxPackets, setMaxPackets] = useState(0);
+  const [maxDuration, setMaxDuration] = useState(0);
+  const [ringBuffer, setRingBuffer] = useState(false);
+  const [maxFileSize, setMaxFileSize] = useState(100);
+  const [maxFiles, setMaxFiles] = useState(5);
 
   // Format hex view from raw buffer
   const formatHexView = (buffer: Uint8Array): string => {
@@ -64,18 +78,55 @@ export const PacketCapture: React.FC = () => {
       alert(`Capture error: ${error}`);
     });
 
+    window.api.onCaptureStopped((stats) => {
+      setIsCapturing(false);
+      console.log(`Capture stopped. Packets: ${stats.packetCount}, Duration: ${stats.duration}s`);
+    });
+
+    window.api.onCaptureFileRotated((filepath) => {
+      console.log(`Ring buffer file rotated: ${filepath}`);
+    });
+
     window.api.onSecurityAlert((alert) => {
       setSecurityAlerts(prev => [alert, ...prev].slice(0, 50));
+    });
+
+    window.api.onExpertAlert((alert) => {
+      setExpertAlerts(prev => [alert, ...prev].slice(0, 100));
     });
   }, []);
 
   const handleStartCapture = async () => {
     if (!selectedInterface || !window.api) return;
-    const result = await window.api.startCapture(selectedInterface);
+
+    const options = {
+      filter: bpfFilter,
+      promiscuous,
+      monitor: monitorMode,
+      maxPackets,
+      maxDuration,
+      ringBuffer,
+      maxFileSize: maxFileSize * 1024 * 1024, // Convert MB to bytes
+      maxFiles,
+      outputDir: ringBuffer ? './captures' : null
+    };
+
+    const result = await window.api.startCapture(selectedInterface, options);
     if (result.success) {
       setIsCapturing(true);
     } else {
       alert(`Error: ${result.error}`);
+    }
+  };
+
+  const handleLoadPcap = async () => {
+    if (!window.api) return;
+    const result = await window.api.loadPcapFile();
+    if (result.success) {
+      setPackets([]); // Clear existing packets
+      // Packets will be populated via the onPacketCaptured listener
+    } else if (result.error) {
+      alert(`Error loading file: ${result.error}`);
     }
   };
 
@@ -151,6 +202,31 @@ export const PacketCapture: React.FC = () => {
           Clear
         </button>
 
+        <button
+          onClick={handleLoadPcap}
+          disabled={isCapturing}
+          className="flex items-center gap-2 rounded-lg border border-purple-600 text-purple-600 px-4 py-2 text-sm font-medium hover:bg-purple-50 dark:hover:bg-purple-900/20 disabled:opacity-50"
+        >
+          <IconFileExport size={16} />
+          Load PCAP
+        </button>
+
+        <button
+          onClick={() => setShowAdvanced(!showAdvanced)}
+          disabled={isCapturing}
+          className="rounded-lg border border-neutral-300 px-4 py-2 text-sm font-medium dark:border-neutral-700"
+        >
+          {showAdvanced ? 'Hide' : 'Show'} Advanced
+        </button>
+
+        <button
+          onClick={() => setShowStatistics(true)}
+          className="flex items-center gap-2 rounded-lg border border-blue-600 text-blue-600 px-4 py-2 text-sm font-medium hover:bg-blue-50 dark:hover:bg-blue-900/20"
+        >
+          <IconChartBar size={16} />
+          Statistics
+        </button>
+
         <input
           type="text"
           value={filter}
@@ -178,6 +254,128 @@ export const PacketCapture: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {/* Advanced Options */}
+      {showAdvanced && (
+        <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-4 dark:border-neutral-700 dark:bg-neutral-800">
+          <h3 className="mb-3 text-sm font-semibold">Advanced Capture Options</h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {/* BPF Filter */}
+            <div className="col-span-full">
+              <label className="block text-xs font-medium mb-1">BPF Filter (Berkeley Packet Filter)</label>
+              <input
+                type="text"
+                value={bpfFilter}
+                onChange={(e) => setBpfFilter(e.target.value)}
+                placeholder="e.g., tcp port 443, host 192.168.1.1"
+                className="w-full rounded-lg border border-neutral-300 bg-white px-3 py-1.5 text-sm dark:border-neutral-600 dark:bg-neutral-900"
+                disabled={isCapturing}
+              />
+              <p className="mt-1 text-xs text-neutral-500">Filter packets during capture (more efficient than UI filter)</p>
+            </div>
+
+            {/* Promiscuous Mode */}
+            <div>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={promiscuous}
+                  onChange={(e) => setPromiscuous(e.target.checked)}
+                  disabled={isCapturing}
+                  className="rounded"
+                />
+                <span className="text-sm font-medium">Promiscuous Mode</span>
+              </label>
+              <p className="mt-1 text-xs text-neutral-500">Capture all packets on the network</p>
+            </div>
+
+            {/* Monitor Mode */}
+            <div>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={monitorMode}
+                  onChange={(e) => setMonitorMode(e.target.checked)}
+                  disabled={isCapturing}
+                  className="rounded"
+                />
+                <span className="text-sm font-medium">Monitor Mode (Wi-Fi)</span>
+              </label>
+              <p className="mt-1 text-xs text-neutral-500">Capture raw 802.11 frames</p>
+            </div>
+
+            {/* Ring Buffer */}
+            <div>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={ringBuffer}
+                  onChange={(e) => setRingBuffer(e.target.checked)}
+                  disabled={isCapturing}
+                  className="rounded"
+                />
+                <span className="text-sm font-medium">Ring Buffer</span>
+              </label>
+              <p className="mt-1 text-xs text-neutral-500">Auto-rotate capture files</p>
+            </div>
+
+            {/* Max Packets */}
+            <div>
+              <label className="block text-xs font-medium mb-1">Max Packets (0 = unlimited)</label>
+              <input
+                type="number"
+                value={maxPackets}
+                onChange={(e) => setMaxPackets(Number(e.target.value))}
+                min={0}
+                className="w-full rounded-lg border border-neutral-300 bg-white px-3 py-1.5 text-sm dark:border-neutral-600 dark:bg-neutral-900"
+                disabled={isCapturing}
+              />
+            </div>
+
+            {/* Max Duration */}
+            <div>
+              <label className="block text-xs font-medium mb-1">Max Duration (seconds, 0 = unlimited)</label>
+              <input
+                type="number"
+                value={maxDuration}
+                onChange={(e) => setMaxDuration(Number(e.target.value))}
+                min={0}
+                className="w-full rounded-lg border border-neutral-300 bg-white px-3 py-1.5 text-sm dark:border-neutral-600 dark:bg-neutral-900"
+                disabled={isCapturing}
+              />
+            </div>
+
+            {/* Ring Buffer Settings */}
+            {ringBuffer && (
+              <>
+                <div>
+                  <label className="block text-xs font-medium mb-1">Max File Size (MB)</label>
+                  <input
+                    type="number"
+                    value={maxFileSize}
+                    onChange={(e) => setMaxFileSize(Number(e.target.value))}
+                    min={1}
+                    className="w-full rounded-lg border border-neutral-300 bg-white px-3 py-1.5 text-sm dark:border-neutral-600 dark:bg-neutral-900"
+                    disabled={isCapturing}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium mb-1">Max Files to Keep</label>
+                  <input
+                    type="number"
+                    value={maxFiles}
+                    onChange={(e) => setMaxFiles(Number(e.target.value))}
+                    min={1}
+                    max={100}
+                    className="w-full rounded-lg border border-neutral-300 bg-white px-3 py-1.5 text-sm dark:border-neutral-600 dark:bg-neutral-900"
+                    disabled={isCapturing}
+                  />
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Stats */}
       <div className="flex gap-4">
@@ -339,6 +537,70 @@ export const PacketCapture: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Expert Alerts Panel */}
+      {expertAlerts.length > 0 && (
+        <div className="mt-4 rounded-lg border border-neutral-200 bg-white dark:border-neutral-700 dark:bg-neutral-900 overflow-hidden">
+          <div className="border-b border-neutral-200 px-4 py-3 dark:border-neutral-700 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <IconAlertTriangle size={18} className="text-orange-600" />
+              <h3 className="text-sm font-semibold">Expert Alerts</h3>
+              <span className="text-xs text-neutral-500">({expertAlerts.length})</span>
+            </div>
+            <button
+              onClick={() => setExpertAlerts([])}
+              className="text-xs text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300"
+            >
+              Clear
+            </button>
+          </div>
+          <div className="max-h-48 overflow-auto p-4 space-y-2">
+            {expertAlerts.map((alert, idx) => (
+              <div
+                key={idx}
+                className="flex items-start gap-3 rounded-lg border border-neutral-200 dark:border-neutral-700 p-3 text-xs hover:bg-neutral-50 dark:hover:bg-neutral-800/50"
+              >
+                <IconAlertTriangle
+                  size={16}
+                  className={cn(
+                    'mt-0.5 flex-shrink-0',
+                    alert.severity === 'critical' && 'text-red-600',
+                    alert.severity === 'high' && 'text-orange-600',
+                    alert.severity === 'medium' && 'text-yellow-600',
+                    alert.severity === 'low' && 'text-blue-600'
+                  )}
+                />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span
+                      className={cn(
+                        'text-xs font-semibold uppercase',
+                        alert.severity === 'critical' && 'text-red-600',
+                        alert.severity === 'high' && 'text-orange-600',
+                        alert.severity === 'medium' && 'text-yellow-600',
+                        alert.severity === 'low' && 'text-blue-600'
+                      )}
+                    >
+                      {alert.severity}
+                    </span>
+                    <span className="text-neutral-400">•</span>
+                    <span className="text-neutral-600 dark:text-neutral-400">{alert.category}</span>
+                    <span className="text-neutral-400">•</span>
+                    <span className="font-medium">{alert.protocol}</span>
+                    <span className="text-neutral-400">•</span>
+                    <span className="text-neutral-500">Packet #{alert.packet}</span>
+                  </div>
+                  <div className="font-medium mb-1">{alert.message}</div>
+                  <div className="text-neutral-600 dark:text-neutral-400">{alert.details}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Statistics Panel Modal */}
+      {showStatistics && <StatisticsPanel onClose={() => setShowStatistics(false)} />}
     </div>
   );
 };
