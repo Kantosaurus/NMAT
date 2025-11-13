@@ -1,0 +1,13 @@
+{
+  "id": "example-scanner",
+  "name": "Example Scanner Extension",
+  "version": "1.0.0",
+  "description": "Example scanner extension that demonstrates the Extension API",
+  "author": "NMAT Team",
+  "type": "scanner",
+  "main": "index.js",
+  "permissions": [
+    "http",
+    "database"
+  ]
+}

@@ -6,6 +6,7 @@ const HTTPProxy = require('./httpProxy');
 const StatisticsAnalyzer = require('./statisticsAnalyzer');
 const ConfigurationManager = require('./configurationManager');
 const LuaScriptEngine = require('./luaScriptEngine');
+const ProxyBackend = require('./backend/proxy-backend');
 
 let mainWindow;
 let packetCapture;
@@ -14,6 +15,7 @@ let httpProxy;
 let statisticsAnalyzer;
 let configManager;
 let luaEngine;
+let proxyBackend;
 
 // Development mode check
 const isDev = !app.isPackaged;
@@ -65,6 +67,9 @@ function createWindow() {
     if (httpProxy) {
       httpProxy.stop();
     }
+    if (proxyBackend) {
+      proxyBackend.close();
+    }
     mainWindow = null;
   });
 }
@@ -95,6 +100,9 @@ app.whenReady().then(() => {
   });
 
   createWindow();
+
+  // Initialize proxy backend
+  proxyBackend = new ProxyBackend(mainWindow);
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

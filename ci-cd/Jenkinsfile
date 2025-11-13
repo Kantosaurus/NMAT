@@ -1,0 +1,169 @@
+// NMAT Security Scan - Jenkins Pipeline
+// Add this as a Jenkinsfile in your repository
+
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'TARGET_URL', defaultValue: 'https://your-app.example.com', description: 'Target URL to scan')
+        choice(name: 'SCAN_TYPE', choices: ['quick', 'full', 'deep'], description: 'Scan depth')
+        booleanParam(name: 'FAIL_ON_HIGH', defaultValue: true, description: 'Fail build on high severity issues')
+    }
+
+    environment {
+        NMAT_API_URL = credentials('nmat-api-url')
+        NMAT_API_KEY = credentials('nmat-api-key')
+    }
+
+    stages {
+        stage('Setup') {
+            steps {
+                script {
+                    echo 'Installing NMAT CLI...'
+                    sh 'npm install -g nmat-cli'
+                    sh "nmat configure --url ${NMAT_API_URL} --key ${NMAT_API_KEY}"
+                }
+            }
+        }
+
+        stage('Security Scan') {
+            steps {
+                script {
+                    echo "Starting NMAT security scan on ${params.TARGET_URL}..."
+
+                    def scanTimeout = params.SCAN_TYPE == 'deep' ? 1800 : 600
+                    def failOnHigh = params.FAIL_ON_HIGH ? '--fail-on-high' : ''
+
+                    sh """
+                        nmat ci-scan \
+                            --target ${params.TARGET_URL} \
+                            --output nmat-report.json \
+                            ${failOnHigh} \
+                            --timeout ${scanTimeout}
+                    """
+                }
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'nmat-report.json', fingerprint: true
+                }
+            }
+        }
+
+        stage('Generate Reports') {
+            parallel {
+                stage('HTML Report') {
+                    steps {
+                        sh 'nmat report generate --format html --output nmat-report.html'
+                        publishHTML([
+                            allowMissing: false,
+                            alwaysLinkToLastBuild: true,
+                            keepAll: true,
+                            reportDir: '.',
+                            reportFiles: 'nmat-report.html',
+                            reportName: 'NMAT Security Report'
+                        ])
+                    }
+                }
+
+                stage('XML Report') {
+                    steps {
+                        sh 'nmat report generate --format xml --output nmat-report.xml'
+                        archiveArtifacts artifacts: 'nmat-report.xml'
+                    }
+                }
+            }
+        }
+
+        stage('Analysis') {
+            steps {
+                script {
+                    def report = readJSON file: 'nmat-report.json'
+
+                    echo "=== NMAT Scan Results ==="
+                    echo "Total Vulnerabilities: ${report.totalVulnerabilities}"
+                    echo "Critical: ${report.bySeverity.critical ?: 0}"
+                    echo "High: ${report.bySeverity.high ?: 0}"
+                    echo "Medium: ${report.bySeverity.medium ?: 0}"
+                    echo "Low: ${report.bySeverity.low ?: 0}"
+
+                    // Store metrics
+                    recordMetrics([
+                        'Total Vulnerabilities': report.totalVulnerabilities,
+                        'Critical': report.bySeverity.critical ?: 0,
+                        'High': report.bySeverity.high ?: 0
+                    ])
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                script {
+                    def report = readJSON file: 'nmat-report.json'
+
+                    if (params.FAIL_ON_HIGH) {
+                        if ((report.bySeverity.critical ?: 0) > 0) {
+                            error("Build failed: Critical vulnerabilities found!")
+                        }
+                        if ((report.bySeverity.high ?: 0) > 0) {
+                            error("Build failed: High severity vulnerabilities found!")
+                        }
+                    }
+
+                    echo "Quality gate passed!"
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            // Clean up
+            sh 'rm -f nmat-report.*'
+        }
+
+        success {
+            echo 'NMAT security scan completed successfully!'
+
+            // Send success notification
+            emailext(
+                to: '${DEFAULT_RECIPIENTS}',
+                subject: "NMAT Scan Passed: ${env.JOB_NAME} - Build #${env.BUILD_NUMBER}",
+                body: """
+                    <h2>NMAT Security Scan Passed</h2>
+                    <p>Job: ${env.JOB_NAME}</p>
+                    <p>Build: ${env.BUILD_NUMBER}</p>
+                    <p>Target: ${params.TARGET_URL}</p>
+                    <p><a href="${env.BUILD_URL}NMAT_Security_Report">View Report</a></p>
+                """,
+                mimeType: 'text/html'
+            )
+        }
+
+        failure {
+            echo 'NMAT security scan failed!'
+
+            // Send failure notification
+            emailext(
+                to: '${DEFAULT_RECIPIENTS}',
+                subject: "NMAT Scan Failed: ${env.JOB_NAME} - Build #${env.BUILD_NUMBER}",
+                body: """
+                    <h2>NMAT Security Scan Failed</h2>
+                    <p>Job: ${env.JOB_NAME}</p>
+                    <p>Build: ${env.BUILD_NUMBER}</p>
+                    <p>Target: ${params.TARGET_URL}</p>
+                    <p>Critical vulnerabilities were detected!</p>
+                    <p><a href="${env.BUILD_URL}NMAT_Security_Report">View Report</a></p>
+                """,
+                mimeType: 'text/html'
+            )
+
+            // Post to Slack
+            slackSend(
+                color: 'danger',
+                message: "NMAT Security Scan Failed: ${env.JOB_NAME} - <${env.BUILD_URL}|Build #${env.BUILD_NUMBER}>"
+            )
+        }
+    }
+}

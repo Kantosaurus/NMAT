@@ -61,7 +61,7 @@ Burp Suite (by PortSwigger) is a leading integrated platform for web application
 - **Useful for detecting subtle changes after tampering (e.g., signatures, headers)**.
 
 ### 10. Extender & BApp Store
-- **Extender API** for Java and Python (Jython) extensions to augment Burp’s functionality.
+- **Extender API** for Java and Python (Jython) extensions to augment Burp’s functionality.Im
 - **BApp Store** (built-in) for installing community and vendor extensions (e.g., active scanners, authentication helpers, custom decoders, API testing tools).
 - **Loadable extensions** can add new scanners, custom rules, UI panels, and interactive tools.
 

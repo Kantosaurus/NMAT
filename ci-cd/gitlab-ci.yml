@@ -1,0 +1,92 @@
+# NMAT Security Scan - GitLab CI/CD Pipeline
+# Add this to your .gitlab-ci.yml file
+
+stages:
+  - test
+  - security
+  - report
+
+variables:
+  NMAT_API_URL: "http://nmat-server:8080"
+  TARGET_URL: "https://your-app.example.com"
+
+# Security scan job
+nmat_security_scan:
+  stage: security
+  image: node:18
+  before_script:
+    - npm install -g nmat-cli
+    - nmat configure --url $NMAT_API_URL --key $NMAT_API_KEY
+  script:
+    - |
+      nmat ci-scan \
+        --target $TARGET_URL \
+        --output nmat-report.json \
+        --fail-on-high \
+        --timeout 600
+  artifacts:
+    when: always
+    paths:
+      - nmat-report.json
+    reports:
+      junit: nmat-report.json
+    expire_in: 30 days
+  allow_failure: false
+  only:
+    - merge_requests
+    - main
+    - develop
+  tags:
+    - docker
+
+# Generate HTML report
+nmat_html_report:
+  stage: report
+  image: node:18
+  needs: ["nmat_security_scan"]
+  before_script:
+    - npm install -g nmat-cli
+    - nmat configure --url $NMAT_API_URL --key $NMAT_API_KEY
+  script:
+    - nmat report generate --format html --output nmat-report.html
+  artifacts:
+    paths:
+      - nmat-report.html
+    expire_in: 30 days
+  when: always
+  tags:
+    - docker
+
+# Scheduled daily scan
+nmat_scheduled_scan:
+  extends: nmat_security_scan
+  only:
+    - schedules
+  script:
+    - |
+      nmat ci-scan \
+        --target $TARGET_URL \
+        --output nmat-report-scheduled.json \
+        --timeout 1800
+    - |
+      # Send notification on failure
+      if [ -f nmat-report-scheduled.json ]; then
+        curl -X POST $WEBHOOK_URL \
+          -H 'Content-Type: application/json' \
+          -d @nmat-report-scheduled.json
+      fi
+
+# Pages deployment for reports
+pages:
+  stage: report
+  dependencies:
+    - nmat_html_report
+  script:
+    - mkdir -p public
+    - cp nmat-report.html public/index.html
+  artifacts:
+    paths:
+      - public
+  only:
+    - main
+  when: always

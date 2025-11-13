@@ -1,0 +1,126 @@
+# NMAT Security Scan - GitHub Actions Workflow
+# Add this file to .github/workflows/nmat-scan.yml in your repository
+
+name: NMAT Security Scan
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Run daily at 2 AM
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: 'Target URL to scan'
+        required: true
+        default: 'https://your-app.example.com'
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Install NMAT CLI
+        run: |
+          npm install -g nmat-cli
+          # Or if using local NMAT installation:
+          # npm install
+
+      - name: Configure NMAT
+        run: |
+          nmat configure \
+            --url ${{ secrets.NMAT_API_URL }} \
+            --key ${{ secrets.NMAT_API_KEY }}
+
+      - name: Run Security Scan
+        id: scan
+        run: |
+          nmat ci-scan \
+            --target ${{ github.event.inputs.target_url || secrets.TARGET_URL }} \
+            --output nmat-report.json \
+            --fail-on-high \
+            --timeout 600
+        continue-on-error: true
+
+      - name: Upload Scan Results
+        uses: actions/upload-artifact@v3
+        with:
+          name: nmat-security-report
+          path: nmat-report.json
+
+      - name: Generate HTML Report
+        if: always()
+        run: |
+          nmat report generate \
+            --format html \
+            --output nmat-report.html
+
+      - name: Upload HTML Report
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: nmat-security-report-html
+          path: nmat-report.html
+
+      - name: Comment PR with Results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            const report = JSON.parse(fs.readFileSync('nmat-report.json', 'utf8'));
+
+            const comment = `## NMAT Security Scan Results
+
+            **Total Vulnerabilities:** ${report.totalVulnerabilities}
+            - Critical: ${report.bySeverity.critical || 0}
+            - High: ${report.bySeverity.high || 0}
+            - Medium: ${report.bySeverity.medium || 0}
+            - Low: ${report.bySeverity.low || 0}
+
+            [View Full Report](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})
+            `;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+      - name: Fail if critical issues found
+        if: steps.scan.outcome == 'failure'
+        run: |
+          echo "Critical or high severity vulnerabilities found!"
+          exit 1
+
+      - name: Post to Slack
+        if: failure()
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "NMAT Security Scan Failed",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*NMAT Security Scan Failed*\nCritical vulnerabilities detected in ${{ github.repository }}"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
